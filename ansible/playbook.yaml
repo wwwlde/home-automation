@@ -1,0 +1,282 @@
+---
+- name: Install Docker, configure Traefik network, and optimize Raspberry Pi 4B
+  hosts: all
+  become: true
+  collections:
+    - community.docker
+
+  vars:
+    # Docker Network Configuration
+    network_name: "traefik"
+    subnet: "10.0.10.0/24"
+    gateway: "10.0.10.1"
+    mtu: "1500"
+
+  tasks:
+    # -------------------------
+    # Install dbus-broker and bluez
+    # -------------------------
+    - name: Install dbus-broker and bluez
+      apt:
+        name:
+          - dbus-broker
+          - bluez
+        state: present
+        update_cache: yes
+
+    - name: Enable dbus-broker service
+      systemd:
+        name: dbus-broker.service
+        enabled: yes
+        state: started
+
+    # -------------------------
+    # Docker Installation
+    # -------------------------
+    - name: Install required APT packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - python3-pip  # Required for Ansible Docker modules
+        state: present
+        update_cache: yes
+
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker APT repository
+      apt_repository:
+        repo: "deb [arch=arm64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+        filename: docker
+
+    - name: Update APT package index after adding Docker repo
+      apt:
+        update_cache: yes
+
+    - name: Install Docker Engine, CLI, and Compose plugin
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+        state: latest
+
+    - name: Enable and start Docker service
+      systemd:
+        name: docker
+        enabled: yes
+        state: started
+
+    - name: Add current user to the docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Install Python Docker SDK (required for Ansible Docker modules)
+      pip:
+        name: docker
+
+    # -------------------------
+    # Docker Daemon Optimizations
+    # -------------------------
+    - name: Optimize Docker Daemon configuration
+      copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "50m",
+              "max-file": "3"
+            },
+            "storage-driver": "overlay2",
+            "exec-opts": ["native.cgroupdriver=systemd"],
+            "default-ulimits": {
+              "nofile": {
+                "Name": "nofile",
+                "Hard": 65535,
+                "Soft": 65535
+              }
+            },
+            "live-restore": true,
+            "max-concurrent-downloads": 10,
+            "max-concurrent-uploads": 5
+          }
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart Docker
+
+    # -------------------------
+    # Docker Network Configuration for Traefik
+    # -------------------------
+    - name: Create Docker network for Traefik
+      community.docker.docker_network:
+        name: "{{ network_name }}"
+        driver: bridge
+        ipam_options:
+          - subnet: "{{ subnet }}"
+            gateway: "{{ gateway }}"
+        options:
+          com.docker.network.bridge.enable_icc: "true"
+          com.docker.network.bridge.enable_ip_masquerade: "true"
+          com.docker.network.bridge.host_binding_ipv4: "0.0.0.0"
+          com.docker.network.bridge.name: "{{ network_name }}"
+          com.docker.network.driver.mtu: "{{ mtu }}"
+        state: present
+
+    - name: Verify the Traefik network
+      community.docker.docker_network_info:
+        name: "{{ network_name }}"
+      register: network_info
+
+    - name: Display Traefik network details
+      debug:
+        var: network_info.networks
+
+    # -------------------------
+    # Raspberry Pi Optimizations
+    # -------------------------
+    - name: Apply Raspberry Pi performance optimizations using user-config.txt
+      copy:
+        dest: /boot/firmware/user-config.txt
+        content: |
+          # Set GPU frequency to 250 MHz for minimal performance (saves power).
+          gpu_freq=250
+
+          # Ensure the minimum GPU frequency is also 250 MHz to avoid dynamic scaling.
+          gpu_freq_min=250
+
+          # Allocate only 16 MB of memory to the GPU, ideal for headless systems without a display.
+          gpu_mem=16
+
+          # Limit the CPU temperature to 80°C to prevent overheating and throttling.
+          temp_limit=80
+
+          # Disable built-in Wi-Fi to reduce power consumption and improve security.
+          dtoverlay=disable-wifi
+
+          # Disable the onboard audio interface to save resources if not needed.
+          dtparam=audio=off
+
+          # Disable I2C interface (commented out). Enable if needed for GPIO-based communication.
+          # dtparam=i2c_arm=off
+
+          # Disable SPI interface (commented out). Enable if required for SPI devices.
+          # dtparam=spi=off
+
+          # Enable memory cgroups for containerization (Docker, Kubernetes) and allow swap accounting.
+          cgroup_enable=memory cgroup_memory=1 swapaccount=1
+
+          # Turn off the ACT LED trigger (activity LED), preventing it from blinking with system activity.
+          dtparam=act_led_trigger=none
+
+          # Invert the logic of the ACT LED so it remains off by default (active-low logic).
+          dtparam=act_led_activelow=on
+
+          # Disable the power LED trigger to stop it from indicating system status.
+          dtparam=pwr_led_trigger=none
+
+          # Invert the logic of the power LED to keep it off (active-low logic).
+          dtparam=pwr_led_activelow=on
+
+          # Disable Ethernet LED0 (usually the link/activity indicator) for power saving.
+          dtparam=eth_led0=4
+
+          # Disable Ethernet LED1 (usually speed indicator) to reduce power usage.
+          dtparam=eth_led1=4
+
+          # Turn off the SD card activity LED to prevent blinking during read/write operations.
+          dtparam=sd_led=off
+
+          # Invert the SD card LED logic to ensure it stays off by default.
+          dtparam=sd_led_active_low=on
+
+          # Completely disable the ACT LED using a device tree overlay for persistent deactivation.
+          dtoverlay=disable-act-led
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reboot system
+
+    - name: Ensure user-config.txt is included in main config.txt
+      lineinfile:
+        path: /boot/firmware/config.txt
+        line: 'include user-config.txt'
+        state: present
+      notify: Reboot system
+
+    - name: Enable memory cgroups for better container performance
+      lineinfile:
+        path: /boot/firmware/user-config.txt
+        regexp: 'cgroup_enable=memory'
+        line: 'cgroup_enable=memory cgroup_memory=1 swapaccount=1'
+        state: present
+      notify: Reboot system
+
+    # -------------------------
+    # Network and System Optimizations
+    # -------------------------
+    - name: Optimize sysctl settings for networking and performance
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+      loop:
+        - { key: 'net.core.rmem_max', value: '16777216' }
+        - { key: 'net.core.wmem_max', value: '16777216' }
+        - { key: 'net.ipv4.tcp_window_scaling', value: '1' }
+        - { key: 'net.ipv4.tcp_congestion_control', value: 'bbr' }
+        - { key: 'vm.swappiness', value: '10' }
+        - { key: 'fs.file-max', value: '100000' }
+        - { key: 'net.core.somaxconn', value: '1024' }
+        - { key: 'net.ipv4.ip_forward', value: '1' }
+
+    # -------------------------
+    # ZRAM for Memory Optimization
+    # -------------------------
+    - name: Install zram-tools for memory compression
+      apt:
+        name: zram-tools
+        state: present
+        update_cache: yes
+
+    - name: Enable zram-config service
+      systemd:
+        name: zram-config
+        enabled: yes
+        state: started
+
+    # -------------------------
+    # Permanent Network Optimizations
+    # -------------------------
+    - name: Disable tso, gso, gro for eth0 permanently
+      copy:
+        dest: /etc/network/if-up.d/disable-offload
+        content: |
+          #!/bin/sh
+          /sbin/ethtool -K eth0 tso off gso off gro off
+        owner: root
+        group: root
+        mode: '0755'
+
+  handlers:
+    - name: Restart Docker
+      systemd:
+        name: docker
+        state: restarted
+
+    - name: Reboot system
+      reboot:
+        msg: "Rebooting to apply system optimizations..."
+        reboot_timeout: 300

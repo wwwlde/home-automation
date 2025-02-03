@@ -1,0 +1,110 @@
+name: homeassistant
+
+networks:
+  traefik:
+    external: true
+
+services:
+  homeassistant:
+    container_name: homeassistant
+    image: ghcr.io/home-assistant/home-assistant:${HOMEASSISTANT_IMAGE_TAG}
+    mem_limit: 2048m
+    cpus: 1.5
+    networks:
+      traefik:
+        ipv4_address: ${HOMEASSISTANT_CONTAINER_IP}
+    privileged: true
+    logging:
+        driver: "json-file"
+        options:
+            max-file: 5
+            max-size: 10m
+    environment:
+      - TZ=${TIMEZONE}
+      - LOGGER=true
+    volumes:
+      - ./data/homeassistant/config:/config
+      - /etc/localtime:/etc/localtime:ro
+      - /var/run/dbus:/var/run/dbus
+      - /var/run/avahi-daemon/socket:/var/run/avahi-daemon/socket
+    depends_on:
+      - mosquitto
+      - zigbee2mqtt
+      - vscode-server
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    labels:
+      - "traefik.enable=true"
+      # HTTP -> HTTPS redirection
+      - "traefik.http.routers.homeassistant-web.rule=Host(`${HOMEASSISTANT_DASH_URL}`)"
+      - "traefik.http.routers.homeassistant-web.entrypoints=web"
+      - "traefik.http.routers.homeassistant-web.middlewares=redirect-to-https@file"
+      # HTTPS configuration
+      - "traefik.http.routers.homeassistant.rule=Host(`${HOMEASSISTANT_DASH_URL}`)"
+      - "traefik.http.routers.homeassistant.entrypoints=websecure"
+      - "traefik.http.routers.homeassistant.service=homeassistant"
+      - "traefik.http.routers.homeassistant.tls.certresolver=letsencrypt"
+      - "traefik.http.services.homeassistant.loadbalancer.server.port=8123"
+  zigbee2mqtt:
+    container_name: zigbee2mqtt
+    image: koenkk/zigbee2mqtt:${ZIGBEE2MQTT_IMAGE_TAG}
+    mem_limit: 256m
+    cpus: 0.5
+    logging:
+        driver: "json-file"
+        options:
+            max-file: 5
+            max-size: 10m
+    volumes:
+      - ./data/zigbee2mqtt/data:/app/data
+      - /run/udev:/run/udev:ro
+    devices:
+      - /dev/serial/by-id/usb-ITead_Sonoff_Zigbee_3.0_USB_Dongle_Plus_64d0b67a40a6ed118658eda32981d5c7-if00-port0:/dev/ttyACM0
+    environment:
+      - TZ=${TIMEZONE}
+    group_add:
+      - dialout
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - mosquitto
+    networks:
+      traefik:
+        ipv4_address: ${ZIGBEE2MQTT_CONTAINER_IP}
+    privileged: true
+    labels:
+      - "traefik.enable=true"
+      # HTTP -> HTTPS redirection
+      - "traefik.http.routers.zigbee2mqtt-web.rule=Host(`${ZIGBEE2MQTT_DASH_URL}`)"
+      - "traefik.http.routers.zigbee2mqtt-web.entrypoints=web"
+      - "traefik.http.routers.zigbee2mqtt-web.middlewares=redirect-to-https@file"
+      # HTTPS configuration
+      - "traefik.http.routers.zigbee2mqtt.rule=Host(`${ZIGBEE2MQTT_DASH_URL}`)"
+      - "traefik.http.routers.zigbee2mqtt.entrypoints=websecure"
+      - "traefik.http.routers.zigbee2mqtt.service=zigbee2mqtt"
+      - "traefik.http.routers.zigbee2mqtt.tls.certresolver=letsencrypt"
+      - "traefik.http.services.zigbee2mqtt.loadbalancer.server.port=8080"
+  mosquitto:
+    container_name: mosquitto
+    image: eclipse-mosquitto:${MOSQUITTO_IMAGE_TAG}
+    mem_limit: 128m
+    cpus: 0.5
+    networks:
+      traefik:
+        ipv4_address: ${MOSQUITTO_CONTAINER_IP}
+    restart: unless-stopped
+    environment:
+      - TZ=${TIMEZONE}
+    logging:
+        driver: "json-file"
+        options:
+            max-file: 5
+            max-size: 10m
+    volumes:
+      - ./data/mosquitto/config:/mosquitto/config
+      - ./data/mosquitto/data:/mosquitto/data
+      - ./data/mosquitto/log:/mosquitto/log
+    stdin_open: true
+    tty: true

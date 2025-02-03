@@ -1,0 +1,5 @@
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+experimental:
+  http3: true
